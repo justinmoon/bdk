@@ -405,8 +405,8 @@ macro_rules! fragment {
 
 #[cfg(test)]
 mod test {
-    use bitcoin::hashes::hex::ToHex;
-    use miniscript::descriptor::{DescriptorPublicKey, KeyMap};
+    use bitcoin::{secp256k1::Secp256k1, hashes::hex::ToHex};
+    use miniscript::{DescriptorPublicKeyCtx, descriptor::{DescriptorPublicKey, KeyMap}};
     use miniscript::{Descriptor, Legacy, Segwitv0};
 
     use std::str::FromStr;
@@ -429,6 +429,7 @@ mod test {
         let (desc, _key_map, _networks) = desc.unwrap();
         assert_eq!(desc.is_witness(), is_witness);
         assert_eq!(desc.is_fixed(), is_fixed);
+        let secp_ctx = Secp256k1::verification_only();
         for i in 0..expected.len() {
             let index = i as u32;
             let child_desc = if desc.is_fixed() {
@@ -436,11 +437,13 @@ mod test {
             } else {
                 desc.derive(ChildNumber::from_normal_idx(index).unwrap())
             };
-            let address = child_desc.address(Regtest);
+            let child_number = bip32::ChildNumber::from_normal_idx(i as u32).unwrap();
+            let desc_ctx = DescriptorPublicKeyCtx::new(&secp_ctx, child_number);
+            let address = child_desc.address(Regtest, desc_ctx);
             if address.is_some() {
                 assert_eq!(address.unwrap().to_string(), *expected.get(i).unwrap());
             } else {
-                let script = child_desc.script_pubkey();
+                let script = child_desc.script_pubkey(desc_ctx);
                 assert_eq!(script.to_hex().as_str(), *expected.get(i).unwrap());
             }
         }

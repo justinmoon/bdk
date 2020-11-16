@@ -32,12 +32,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use bitcoin::consensus::encode::serialize;
+use bitcoin::{consensus::encode::serialize, secp256k1::{All, Context, Secp256k1, Signing, Verification}};
 use bitcoin::util::bip32::ChildNumber;
 use bitcoin::util::psbt::PartiallySignedTransaction as PSBT;
 use bitcoin::{Address, Network, OutPoint, Script, Transaction, TxOut, Txid};
 
-use miniscript::psbt::PsbtInputSatisfier;
+use miniscript::{DescriptorPublicKeyCtx, psbt::PsbtInputSatisfier};
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace};
@@ -70,7 +70,7 @@ use crate::types::*;
 const CACHE_ADDR_BATCH_SIZE: u32 = 100;
 
 /// Type alias for a [`Wallet`] that uses [`OfflineBlockchain`]
-pub type OfflineWallet<D> = Wallet<OfflineBlockchain, D>;
+pub type OfflineWallet<D, C> = Wallet<OfflineBlockchain, D, C>;
 
 /// A Bitcoin wallet
 ///
@@ -82,7 +82,7 @@ pub type OfflineWallet<D> = Wallet<OfflineBlockchain, D>;
 /// A wallet can be either "online" if the [`blockchain`](crate::blockchain) type provided
 /// implements [`Blockchain`], or "offline" [`OfflineBlockchain`] is used. Offline wallets only expose
 /// methods that don't need any interaction with the blockchain to work.
-pub struct Wallet<B: BlockchainMarker, D: BatchDatabase> {
+pub struct Wallet<B: BlockchainMarker, D: BatchDatabase, C: Signing + Verification> {
     descriptor: ExtendedDescriptor,
     change_descriptor: Option<ExtendedDescriptor>,
 
@@ -97,13 +97,16 @@ pub struct Wallet<B: BlockchainMarker, D: BatchDatabase> {
 
     client: Option<B>,
     database: RefCell<D>,
+
+    secp: Secp256k1<C>,
 }
 
 // offline actions, always available
-impl<B, D> Wallet<B, D>
+impl<B, D, C> Wallet<B, D, C>
 where
     B: BlockchainMarker,
     D: BatchDatabase,
+    C: Signing + Verification,  // FIXME: rename this import to SecpContext
 {
     /// Create a new "offline" wallet
     pub fn new_offline<E: ToWalletDescriptor>(
@@ -135,6 +138,7 @@ where
             }
             None => (None, Arc::new(SignersContainer::new())),
         };
+        let secp = Secp256k1::gen_new();
 
         Ok(Wallet {
             descriptor,
@@ -149,16 +153,25 @@ where
 
             client: None,
             database: RefCell::new(database),
+
+            secp,
         })
+    }
+
+    fn desc_ctx(&self, index: u32) -> Result<(ChildNumber, DescriptorPublicKeyCtx<C>), Error> {
+        let child_number = ChildNumber::from_normal_idx(index)?;
+        let desc_ctx = DescriptorPublicKeyCtx::new(&self.secp, child_number);
+        Ok((child_number, desc_ctx))
     }
 
     /// Return a newly generated address using the external descriptor
     pub fn get_new_address(&self) -> Result<Address, Error> {
         let index = self.fetch_and_increment_index(ScriptType::External)?;
+        let (child_number, desc_ctx) = self.desc_ctx(index)?;
 
         self.descriptor
-            .derive(ChildNumber::from_normal_idx(index)?)
-            .address(self.network)
+            .derive(child_number)
+            .address(self.network, desc_ctx)
             .ok_or(Error::ScriptDoesntHaveAddressForm)
     }
 
@@ -602,14 +615,16 @@ where
             details.received -= removed_updatable_output.value;
         }
 
+
+        let (child_number, desc_ctx) = self.desc_ctx(0)?; // FIXME: 0
         let external_weight = self
             .get_descriptor_for_script_type(ScriptType::External)
             .0
-            .max_satisfaction_weight();
+            .max_satisfaction_weight(desc_ctx);
         let internal_weight = self
             .get_descriptor_for_script_type(ScriptType::Internal)
             .0
-            .max_satisfaction_weight();
+            .max_satisfaction_weight(desc_ctx);
 
         let original_sequence = tx.input[0].sequence;
 
@@ -636,7 +651,7 @@ where
                         // original transaction
                         let weight =
                             serialize(&txin.script_sig).len() * 4 + serialize(&txin.witness).len();
-                        (weight, false)
+                        (Some(weight), false)
                     }
                 };
 
@@ -646,7 +661,7 @@ where
                     is_internal,
                 };
 
-                Ok((utxo, weight))
+                Ok((utxo, weight.unwrap()))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -896,6 +911,7 @@ where
                 return Ok((psbt, false));
             };
 
+            let (_, desc_ctx) = self.desc_ctx(0)?; // FIXME: 0
             match desc.satisfy(
                 input,
                 (
@@ -903,6 +919,7 @@ where
                     After::new(current_height, false),
                     Older::new(current_height, create_height, false),
                 ),
+                desc_ctx
             ) {
                 Ok(_) => continue,
                 Err(e) => {
@@ -947,11 +964,13 @@ where
 
     fn get_change_address(&self) -> Result<Script, Error> {
         let (desc, script_type) = self.get_descriptor_for_script_type(ScriptType::Internal);
+
         let index = self.fetch_and_increment_index(script_type)?;
+        let (child_number, desc_ctx) = self.desc_ctx(index)?;
 
         Ok(desc
-            .derive(ChildNumber::from_normal_idx(index)?)
-            .script_pubkey())
+            .derive(child_number)
+            .script_pubkey(desc_ctx))
     }
 
     fn fetch_and_increment_index(&self, script_type: ScriptType) -> Result<u32, Error> {
@@ -973,10 +992,14 @@ where
             self.cache_addresses(script_type, index, CACHE_ADDR_BATCH_SIZE)?;
         }
 
+        let secp_ctx = Secp256k1::verification_only();
+        let child_number = ChildNumber::from_normal_idx(index)?;
+        let desc_ctx = DescriptorPublicKeyCtx::new(&secp_ctx, child_number);
+
         let hd_keypaths = descriptor.get_hd_keypaths(index)?;
         let script = descriptor
-            .derive(ChildNumber::from_normal_idx(index)?)
-            .script_pubkey();
+            .derive(child_number)
+            .script_pubkey(desc_ctx);
         for validator in &self.address_validators {
             validator.validate(script_type, &hd_keypaths, &script)?;
         }
@@ -1003,10 +1026,11 @@ where
 
         let start_time = time::Instant::new();
         for i in from..(from + count) {
+            let (child_number, desc_ctx) = self.desc_ctx(i)?;
             address_batch.set_script_pubkey(
                 &descriptor
-                    .derive(ChildNumber::from_normal_idx(i)?)
-                    .script_pubkey(),
+                    .derive(child_number)
+                    .script_pubkey(desc_ctx),
                 script_type,
                 i,
             )?;
@@ -1025,14 +1049,15 @@ where
     }
 
     fn get_available_utxos(&self) -> Result<Vec<(UTXO, usize)>, Error> {
+        let (_, desc_ctx) = self.desc_ctx(0)?; // FIXME: 0
         let external_weight = self
             .get_descriptor_for_script_type(ScriptType::External)
             .0
-            .max_satisfaction_weight();
+            .max_satisfaction_weight(desc_ctx);
         let internal_weight = self
             .get_descriptor_for_script_type(ScriptType::Internal)
             .0
-            .max_satisfaction_weight();
+            .max_satisfaction_weight(desc_ctx);
 
         let add_weight = |utxo: UTXO| {
             let weight = match utxo.is_internal {
@@ -1040,7 +1065,7 @@ where
                 false => external_weight,
             };
 
-            (utxo, weight)
+            (utxo, weight.unwrap())
         };
 
         let utxos = self.list_unspent()?.into_iter().map(add_weight).collect();
@@ -1161,10 +1186,11 @@ where
 
             let (desc, _) = self.get_descriptor_for_script_type(script_type);
             psbt_input.hd_keypaths = desc.get_hd_keypaths(child)?;
-            let derived_descriptor = desc.derive(ChildNumber::from_normal_idx(child)?);
+            let (child_number, desc_ctx) = self.desc_ctx(child)?;
+            let derived_descriptor = desc.derive(child_number);
 
-            psbt_input.redeem_script = derived_descriptor.psbt_redeem_script();
-            psbt_input.witness_script = derived_descriptor.psbt_witness_script();
+            psbt_input.redeem_script = derived_descriptor.psbt_redeem_script(desc_ctx);
+            psbt_input.witness_script = derived_descriptor.psbt_witness_script(desc_ctx);
 
             let prev_output = input.previous_output;
             if let Some(prev_tx) = self.database.borrow().get_raw_tx(&prev_output.txid)? {
@@ -1228,10 +1254,11 @@ where
     }
 }
 
-impl<B, D> Wallet<B, D>
+impl<B, D, C> Wallet<B, D, C>
 where
     B: Blockchain,
     D: BatchDatabase,
+    C: Signing + Verification,
 {
     /// Create a new "online" wallet
     #[maybe_async]
@@ -1331,7 +1358,7 @@ where
 mod test {
     use std::str::FromStr;
 
-    use bitcoin::Network;
+    use bitcoin::{secp256k1::All, Network};
 
     use crate::database::memory::MemoryDatabase;
     use crate::database::Database;
@@ -1342,7 +1369,7 @@ mod test {
     #[test]
     fn test_cache_addresses_fixed() {
         let db = MemoryDatabase::new();
-        let wallet: OfflineWallet<_> = Wallet::new_offline(
+        let wallet: OfflineWallet<_, All> = Wallet::new_offline(
             "wpkh(L5EZftvrYaSudiozVRzTqLcHLNDoVn7H5HSfM9BAN6tMJX8oTWz6)",
             None,
             Network::Testnet,
@@ -1376,7 +1403,7 @@ mod test {
     #[test]
     fn test_cache_addresses() {
         let db = MemoryDatabase::new();
-        let wallet: OfflineWallet<_> = Wallet::new_offline("wpkh(tpubEBr4i6yk5nf5DAaJpsi9N2pPYBeJ7fZ5Z9rmN4977iYLCGco1VyjB9tvvuvYtfZzjD5A8igzgw3HeWeeKFmanHYqksqZXYXGsw5zjnj7KM9/*)", None, Network::Testnet, db).unwrap();
+        let wallet: OfflineWallet<_, All> = Wallet::new_offline("wpkh(tpubEBr4i6yk5nf5DAaJpsi9N2pPYBeJ7fZ5Z9rmN4977iYLCGco1VyjB9tvvuvYtfZzjD5A8igzgw3HeWeeKFmanHYqksqZXYXGsw5zjnj7KM9/*)", None, Network::Testnet, db).unwrap();
 
         assert_eq!(
             wallet.get_new_address().unwrap().to_string(),
@@ -1404,7 +1431,7 @@ mod test {
     #[test]
     fn test_cache_addresses_refill() {
         let db = MemoryDatabase::new();
-        let wallet: OfflineWallet<_> = Wallet::new_offline("wpkh(tpubEBr4i6yk5nf5DAaJpsi9N2pPYBeJ7fZ5Z9rmN4977iYLCGco1VyjB9tvvuvYtfZzjD5A8igzgw3HeWeeKFmanHYqksqZXYXGsw5zjnj7KM9/*)", None, Network::Testnet, db).unwrap();
+        let wallet: OfflineWallet<_, All> = Wallet::new_offline("wpkh(tpubEBr4i6yk5nf5DAaJpsi9N2pPYBeJ7fZ5Z9rmN4977iYLCGco1VyjB9tvvuvYtfZzjD5A8igzgw3HeWeeKFmanHYqksqZXYXGsw5zjnj7KM9/*)", None, Network::Testnet, db).unwrap();
 
         assert_eq!(
             wallet.get_new_address().unwrap().to_string(),
@@ -1448,15 +1475,17 @@ mod test {
         "wsh(and_v(v:pk(cVpPVruEDdmutPzisEsYvtST1usBR3ntr8pXSyt6D2YYqXRyPcFW),after(100000)))"
     }
 
+    trait Both: Signing + Verification {}
+
     pub(crate) fn get_funded_wallet(
         descriptor: &str,
     ) -> (
-        OfflineWallet<MemoryDatabase>,
+        OfflineWallet<MemoryDatabase, All>,
         (String, Option<String>),
         bitcoin::Txid,
     ) {
         let descriptors = testutils!(@descriptors (descriptor));
-        let wallet: OfflineWallet<_> = Wallet::new_offline(
+        let wallet: OfflineWallet<_, All> = Wallet::new_offline(
             &descriptors.0,
             None,
             Network::Regtest,

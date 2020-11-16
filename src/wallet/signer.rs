@@ -94,7 +94,7 @@ use std::fmt;
 use std::ops::Bound::Included;
 use std::sync::Arc;
 
-use bitcoin::blockdata::opcodes;
+use bitcoin::{util::bip32::DerivationPath, blockdata::opcodes};
 use bitcoin::blockdata::script::Builder as ScriptBuilder;
 use bitcoin::hashes::{hash160, Hash};
 use bitcoin::secp256k1::{Message, Secp256k1};
@@ -158,6 +158,7 @@ impl fmt::Display for SignerError {
 
 impl std::error::Error for SignerError {}
 
+// FIXME: should this have a signing-capable secp context?
 /// Trait for signers
 ///
 /// This trait can be implemented to provide customized signers to the wallet. For an example see
@@ -199,11 +200,14 @@ impl Signer for DescriptorXKey<ExtendedPrivKey> {
             return Err(SignerError::InputIndexOutOfRange);
         }
 
+        let secp_ctx = Secp256k1::signing_only();
+
         let (public_key, deriv_path) = match psbt.inputs[input_index]
             .hd_keypaths
             .iter()
             .filter_map(|(pk, &(fingerprint, ref path))| {
-                if self.matches(fingerprint, &path).is_some() {
+                // if self.matches(fingerprint, &path).is_some() {
+                if self.matches(&(fingerprint, DerivationPath::clone(path)), &secp_ctx).is_some() {
                     Some((pk, path))
                 } else {
                     None
@@ -324,10 +328,11 @@ pub struct SignersContainer(BTreeMap<SignersContainerKey, Arc<dyn Signer>>);
 
 impl SignersContainer {
     pub fn as_key_map(&self) -> KeyMap {
+        let secp_ctx = Secp256k1::signing_only();
         self.0
             .values()
             .filter_map(|signer| signer.descriptor_secret_key())
-            .filter_map(|secret| secret.as_public().ok().map(|public| (public, secret)))
+            .filter_map(|secret| secret.as_public(&secp_ctx).ok().map(|public| (public, secret)))
             .collect()
     }
 }

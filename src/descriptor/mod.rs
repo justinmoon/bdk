@@ -36,7 +36,7 @@ use bitcoin::util::bip32::{ChildNumber, DerivationPath, Fingerprint};
 use bitcoin::util::psbt;
 use bitcoin::{Network, PublicKey, Script, TxOut};
 
-use miniscript::descriptor::{DescriptorPublicKey, DescriptorXKey, InnerXKey};
+use miniscript::{DescriptorPublicKeyCtx, descriptor::{DescriptorPublicKey, DescriptorXKey, InnerXKey}};
 pub use miniscript::{
     descriptor::KeyMap, Descriptor, Legacy, Miniscript, MiniscriptKey, ScriptContext, Segwitv0,
     Terminal, ToPublicKey,
@@ -92,7 +92,7 @@ impl ToWalletDescriptor for &str {
             self
         };
 
-        ExtendedDescriptor::parse_secret(descriptor)?.to_wallet_descriptor(network)
+        ExtendedDescriptor::parse_descriptor(descriptor)?.to_wallet_descriptor(network)
     }
 }
 
@@ -216,9 +216,10 @@ impl<K: InnerXKey> XKeyUtils for DescriptorXKey<K> {
     }
 
     fn root_fingerprint(&self) -> Fingerprint {
+        let secp_ctx = Secp256k1::signing_only();
         match self.origin {
             Some((fingerprint, _)) => fingerprint,
-            None => self.xkey.xkey_fingerprint(),
+            None => self.xkey.xkey_fingerprint(&secp_ctx),
         }
     }
 }
@@ -232,29 +233,30 @@ pub(crate) trait DescriptorMeta: Sized {
         -> Option<Self>;
 }
 
-pub(crate) trait DescriptorScripts {
-    fn psbt_redeem_script(&self) -> Option<Script>;
-    fn psbt_witness_script(&self) -> Option<Script>;
+pub(crate) trait DescriptorScripts<ToPkCtx: Copy> {
+    fn psbt_redeem_script(&self, to_pk_ctx: ToPkCtx) -> Option<Script>;
+    fn psbt_witness_script(&self, to_pk_ctx: ToPkCtx) -> Option<Script>;
 }
 
-impl<T> DescriptorScripts for Descriptor<T>
+impl<ToPkCtx, T> DescriptorScripts<ToPkCtx> for Descriptor<T>
 where
-    T: miniscript::MiniscriptKey + miniscript::ToPublicKey,
+    ToPkCtx: Copy,
+    T: miniscript::MiniscriptKey + miniscript::ToPublicKey<ToPkCtx>,
 {
-    fn psbt_redeem_script(&self) -> Option<Script> {
+    fn psbt_redeem_script(&self, to_pk_ctx: ToPkCtx) -> Option<Script> {
         match self {
-            Descriptor::ShWpkh(_) => Some(self.witness_script()),
-            Descriptor::ShWsh(ref script) => Some(script.encode().to_v0_p2wsh()),
-            Descriptor::Sh(ref script) => Some(script.encode()),
-            Descriptor::Bare(ref script) => Some(script.encode()),
+            Descriptor::ShWpkh(_) => Some(self.witness_script(to_pk_ctx)),
+            Descriptor::ShWsh(ref script) => Some(script.encode(to_pk_ctx).to_v0_p2wsh()),
+            Descriptor::Sh(ref script) => Some(script.encode(to_pk_ctx)),
+            Descriptor::Bare(ref script) => Some(script.encode(to_pk_ctx)),
             _ => None,
         }
     }
 
-    fn psbt_witness_script(&self) -> Option<Script> {
+    fn psbt_witness_script(&self, to_pk_ctx: ToPkCtx) -> Option<Script> {
         match self {
-            Descriptor::Wsh(ref script) => Some(script.encode()),
-            Descriptor::ShWsh(ref script) => Some(script.encode()),
+            Descriptor::Wsh(ref script) => Some(script.encode(to_pk_ctx)),
+            Descriptor::ShWsh(ref script) => Some(script.encode(to_pk_ctx)),
             _ => None,
         }
     }
@@ -263,13 +265,16 @@ where
 impl DescriptorMeta for Descriptor<DescriptorPublicKey> {
     fn is_witness(&self) -> bool {
         match self {
-            Descriptor::Bare(_) | Descriptor::Pk(_) | Descriptor::Pkh(_) | Descriptor::Sh(_) => {
+            Descriptor::Bare(_) | Descriptor::Pk(_) | Descriptor::Pkh(_) | Descriptor::Sh(_) | Descriptor::ShSortedMulti(_) => {
                 false
             }
             Descriptor::Wpkh(_)
             | Descriptor::ShWpkh(_)
             | Descriptor::Wsh(_)
-            | Descriptor::ShWsh(_) => true,
+            | Descriptor::ShWsh(_) 
+            | Descriptor::ShWshSortedMulti(_) 
+            | Descriptor::WshSortedMulti(_) 
+            => true,
         }
     }
 
@@ -364,9 +369,11 @@ impl DescriptorMeta for Descriptor<DescriptorPublicKey> {
                 // found in `index` and save it in `derive_path`. We expect this to be a derivation
                 // path of length 1 if the key `is_wildcard` and an empty path otherwise.
                 let root_fingerprint = xpub.root_fingerprint();
+                let secp_ctx = Secp256k1::signing_only();
                 let derivation_path: Option<Vec<ChildNumber>> = index
                     .get_key_value(&root_fingerprint)
-                    .and_then(|(fingerprint, path)| xpub.matches(*fingerprint, path))
+                    // .and_then(|(fingerprint, path)| xpub.matches(*fingerprint, path))
+                    .and_then(|(fingerprint, path)| xpub.matches(&(*fingerprint, DerivationPath::clone(path)), &secp_ctx))
                     .map(|prefix| {
                         index
                             .get(&xpub.root_fingerprint())
@@ -431,28 +438,33 @@ impl DescriptorMeta for Descriptor<DescriptorPublicKey> {
             return None;
         }
 
+        let secp_ctx = Secp256k1::verification_only();
+        let child_number = ChildNumber::from_normal_idx(0).unwrap();  // FIXME: 0
+        let desc_ctx = DescriptorPublicKeyCtx::new(&secp_ctx, child_number);
+
         match self {
             Descriptor::Pk(_)
             | Descriptor::Pkh(_)
             | Descriptor::Wpkh(_)
             | Descriptor::ShWpkh(_)
                 if utxo.is_some()
-                    && self.script_pubkey() == utxo.as_ref().unwrap().script_pubkey =>
+                    && self.script_pubkey(desc_ctx) == utxo.as_ref().unwrap().script_pubkey =>
             {
                 Some(self.clone())
             }
             Descriptor::Bare(ms) | Descriptor::Sh(ms)
                 if psbt_input.redeem_script.is_some()
-                    && &ms.encode() == psbt_input.redeem_script.as_ref().unwrap() =>
+                    && &ms.encode(desc_ctx) == psbt_input.redeem_script.as_ref().unwrap() =>
             {
                 Some(self.clone())
             }
             Descriptor::Wsh(ms) | Descriptor::ShWsh(ms)
                 if psbt_input.witness_script.is_some()
-                    && &ms.encode() == psbt_input.witness_script.as_ref().unwrap() =>
+                    && &ms.encode(desc_ctx) == psbt_input.witness_script.as_ref().unwrap() =>
             {
                 Some(self.clone())
             }
+            // FIXME: SortedMultiVec
             _ => None,
         }
     }

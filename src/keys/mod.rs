@@ -29,7 +29,7 @@ use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::ops::Deref;
 
-use bitcoin::secp256k1;
+use bitcoin::secp256k1::{self, Secp256k1};
 
 use bitcoin::util::bip32;
 use bitcoin::{Network, PrivateKey, PublicKey};
@@ -108,9 +108,10 @@ impl<Ctx: ScriptContext> DescriptorKey<Ctx> {
             }
             DescriptorKey::Secret(secret, valid_networks, _) => {
                 let mut key_map = KeyMap::with_capacity(1);
+                let secp_ctx = Secp256k1::new();
 
                 let public = secret
-                    .as_public()
+                    .as_public(&secp_ctx)
                     .map_err(|e| miniscript::Error::Unexpected(e.to_string()))?;
                 key_map.insert(public.clone(), secret);
 

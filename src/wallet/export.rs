@@ -69,6 +69,7 @@
 
 use std::str::FromStr;
 
+use bitcoin::secp256k1::{Context, Signing, Verification};
 use serde::{Deserialize, Serialize};
 
 use miniscript::{Descriptor, ScriptContext, Terminal};
@@ -115,8 +116,8 @@ impl WalletExport {
     ///
     /// If the database is empty or `include_blockheight` is false, the `blockheight` field
     /// returned will be `0`.
-    pub fn export_wallet<B: BlockchainMarker, D: BatchDatabase>(
-        wallet: &Wallet<B, D>,
+    pub fn export_wallet<B: BlockchainMarker, D: BatchDatabase, C: Signing + Verification>(
+        wallet: &Wallet<B, D, C>,
         label: &str,
         include_blockheight: bool,
     ) -> Result<Self, &'static str> {
@@ -200,7 +201,7 @@ impl WalletExport {
 mod test {
     use std::str::FromStr;
 
-    use bitcoin::{Network, Txid};
+    use bitcoin::{secp256k1::All, Network, Txid};
 
     use super::*;
     use crate::database::{memory::MemoryDatabase, BatchOperations};
@@ -231,7 +232,7 @@ mod test {
         let descriptor = "wpkh(xprv9s21ZrQH143K4CTb63EaMxja1YiTnSEWKMbn23uoEnAzxjdUJRQkazCAtzxGm4LSoTSVTptoV9RbchnKPW9HxKtZumdyxyikZFDLhogJ5Uj/44'/0'/0'/0/*)";
         let change_descriptor = "wpkh(xprv9s21ZrQH143K4CTb63EaMxja1YiTnSEWKMbn23uoEnAzxjdUJRQkazCAtzxGm4LSoTSVTptoV9RbchnKPW9HxKtZumdyxyikZFDLhogJ5Uj/44'/0'/0'/1/*)";
 
-        let wallet: OfflineWallet<_> = Wallet::new_offline(
+        let wallet: OfflineWallet<_, All> = Wallet::new_offline(
             descriptor,
             Some(change_descriptor),
             Network::Bitcoin,
@@ -255,7 +256,7 @@ mod test {
 
         let descriptor = "wpkh(xprv9s21ZrQH143K4CTb63EaMxja1YiTnSEWKMbn23uoEnAzxjdUJRQkazCAtzxGm4LSoTSVTptoV9RbchnKPW9HxKtZumdyxyikZFDLhogJ5Uj/44'/0'/0'/0/*)";
 
-        let wallet: OfflineWallet<_> =
+        let wallet: OfflineWallet<_, All> =
             Wallet::new_offline(descriptor, None, Network::Bitcoin, get_test_db()).unwrap();
         WalletExport::export_wallet(&wallet, "Test Label", true).unwrap();
     }
@@ -269,7 +270,7 @@ mod test {
         let descriptor = "wpkh(xprv9s21ZrQH143K4CTb63EaMxja1YiTnSEWKMbn23uoEnAzxjdUJRQkazCAtzxGm4LSoTSVTptoV9RbchnKPW9HxKtZumdyxyikZFDLhogJ5Uj/44'/0'/0'/0/*)";
         let change_descriptor = "wpkh(xprv9s21ZrQH143K4CTb63EaMxja1YiTnSEWKMbn23uoEnAzxjdUJRQkazCAtzxGm4LSoTSVTptoV9RbchnKPW9HxKtZumdyxyikZFDLhogJ5Uj/50'/0'/1/*)";
 
-        let wallet: OfflineWallet<_> = Wallet::new_offline(
+        let wallet: OfflineWallet<_, All> = Wallet::new_offline(
             descriptor,
             Some(change_descriptor),
             Network::Bitcoin,
@@ -292,7 +293,7 @@ mod test {
                                        [c98b1535/48'/0'/0'/2']tpubDCDi5W4sP6zSnzJeowy8rQDVhBdRARaPhK1axABi8V1661wEPeanpEXj4ZLAUEoikVtoWcyK26TKKJSecSfeKxwHCcRrge9k1ybuiL71z4a/1/*\
                                  ))";
 
-        let wallet: OfflineWallet<_> = Wallet::new_offline(
+        let wallet: OfflineWallet<_, All> = Wallet::new_offline(
             descriptor,
             Some(change_descriptor),
             Network::Testnet,
@@ -312,7 +313,7 @@ mod test {
         let descriptor = "wpkh(xprv9s21ZrQH143K4CTb63EaMxja1YiTnSEWKMbn23uoEnAzxjdUJRQkazCAtzxGm4LSoTSVTptoV9RbchnKPW9HxKtZumdyxyikZFDLhogJ5Uj/44'/0'/0'/0/*)";
         let change_descriptor = "wpkh(xprv9s21ZrQH143K4CTb63EaMxja1YiTnSEWKMbn23uoEnAzxjdUJRQkazCAtzxGm4LSoTSVTptoV9RbchnKPW9HxKtZumdyxyikZFDLhogJ5Uj/44'/0'/0'/1/*)";
 
-        let wallet: OfflineWallet<_> = Wallet::new_offline(
+        let wallet: OfflineWallet<_, All> = Wallet::new_offline(
             descriptor,
             Some(change_descriptor),
             Network::Bitcoin,

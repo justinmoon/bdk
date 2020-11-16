@@ -34,7 +34,7 @@
 //! # use bdk::descriptor::*;
 //! let desc = "wsh(and_v(v:pk(cV3oCth6zxZ1UVsHLnGothsWNsaoxRhC6aeNi5VbSdFpwUkgkEci),or_d(pk(cVMTy7uebJgvFaSBwcgvwk8qn8xSLc97dKow4MBetjrrahZoimm2),older(12960))))";
 //!
-//! let (extended_desc, key_map) = ExtendedDescriptor::parse_secret(desc)?;
+//! let (extended_desc, key_map) = ExtendedDescriptor::parse_descriptor(desc)?;
 //! println!("{:?}", extended_desc);
 //!
 //! let signers = Arc::new(key_map.into());
@@ -51,11 +51,11 @@ use std::sync::Arc;
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 
-use bitcoin::hashes::*;
+use bitcoin::{util::bip32::ChildNumber, hashes::*, secp256k1::Secp256k1};
 use bitcoin::util::bip32::Fingerprint;
 use bitcoin::PublicKey;
 
-use miniscript::descriptor::DescriptorPublicKey;
+use miniscript::{descriptor::DescriptorPublicKey, DescriptorPublicKeyCtx};
 use miniscript::{Descriptor, Miniscript, MiniscriptKey, ScriptContext, Terminal, ToPublicKey};
 
 #[allow(unused_imports)]
@@ -673,7 +673,12 @@ fn signature_key(
     key: &<DescriptorPublicKey as MiniscriptKey>::Hash,
     signers: Arc<SignersContainer>,
 ) -> Policy {
-    let key_hash = key.to_public_key().to_pubkeyhash();
+
+    let secp_ctx = Secp256k1::verification_only();
+    let child_number = ChildNumber::from_normal_idx(0).unwrap();
+    let desc_ctx = DescriptorPublicKeyCtx::new(&secp_ctx, child_number);
+
+    let key_hash = key.to_public_key(desc_ctx).to_pubkeyhash();
     let mut policy: Policy = SatisfiableItem::Signature(PKOrF::from_key_hash(key_hash)).into();
 
     if signers.find(SignerId::PkHash(key_hash)).is_some() {
@@ -784,6 +789,7 @@ impl ExtractPolicy for Descriptor<DescriptorPublicKey> {
             | Descriptor::ShWpkh(pubkey) => Ok(Some(signature(pubkey, signers))),
             Descriptor::Bare(inner) | Descriptor::Sh(inner) => Ok(inner.extract_policy(signers)?),
             Descriptor::Wsh(inner) | Descriptor::ShWsh(inner) => Ok(inner.extract_policy(signers)?),
+            _ => unimplemented!("SortedMultiVec") // FIXME
         }
     }
 }

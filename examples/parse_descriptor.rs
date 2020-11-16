@@ -30,6 +30,8 @@ use std::sync::Arc;
 use bdk::bitcoin::util::bip32::ChildNumber;
 use bdk::bitcoin::*;
 use bdk::descriptor::*;
+use bitcoin::secp256k1::Secp256k1;
+use miniscript::DescriptorPublicKeyCtx;
 
 fn main() {
     let desc = "wsh(or_d(\
@@ -39,19 +41,23 @@ fn main() {
                     and_v(vc:pk_h(cVt4o7BGAig1UXywgGSmARhxMdzP5qvQsxKkSsc1XEkw3tDTQFpy),older(1000))\
                    ))";
 
-    let (extended_desc, key_map) = ExtendedDescriptor::parse_secret(desc).unwrap();
+    let (extended_desc, key_map) = ExtendedDescriptor::parse_descriptor(desc).unwrap();
     println!("{:?}", extended_desc);
 
     let signers = Arc::new(key_map.into());
     let policy = extended_desc.extract_policy(signers).unwrap();
     println!("policy: {}", serde_json::to_string(&policy).unwrap());
 
-    let derived_desc = extended_desc.derive(ChildNumber::from_normal_idx(42).unwrap());
+    let secp_ctx = Secp256k1::verification_only();
+    let child_number = ChildNumber::from_normal_idx(0).unwrap();
+    let desc_ctx = DescriptorPublicKeyCtx::new(&secp_ctx, child_number);
+
+    let derived_desc = extended_desc.derive(child_number);
     println!("{:?}", derived_desc);
 
-    let addr = derived_desc.address(Network::Testnet).unwrap();
+    let addr = derived_desc.address(Network::Testnet, desc_ctx).unwrap();
     println!("{}", addr);
 
-    let script = derived_desc.witness_script();
+    let script = derived_desc.witness_script(desc_ctx);
     println!("{:?}", script);
 }

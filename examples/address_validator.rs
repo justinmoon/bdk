@@ -31,7 +31,7 @@ use bdk::wallet::address_validator::{AddressValidator, AddressValidatorError};
 use bdk::ScriptType;
 use bdk::{OfflineWallet, Wallet};
 
-use bitcoin::hashes::hex::FromHex;
+use bitcoin::{secp256k1::All, hashes::hex::FromHex};
 use bitcoin::util::bip32::Fingerprint;
 use bitcoin::{Network, Script};
 
@@ -59,7 +59,7 @@ impl AddressValidator for DummyValidator {
 
 fn main() -> Result<(), bdk::Error> {
     let descriptor = "sh(and_v(v:pk(tpubDDpWvmUrPZrhSPmUzCMBHffvC3HyMAPnWDSAQNBTnj1iZeJa7BZQEttFiP4DS4GCcXQHezdXhn86Hj6LHX5EDstXPWrMaSneRWM8yUf6NFd/*),after(630000)))";
-    let mut wallet: OfflineWallet<_> =
+    let mut wallet: OfflineWallet<_, All> =
         Wallet::new_offline(descriptor, None, Network::Regtest, MemoryDatabase::new())?;
 
     wallet.add_address_validator(Arc::new(DummyValidator));
